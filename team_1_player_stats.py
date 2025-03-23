@@ -1,9 +1,11 @@
 import sys
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
 import pandas as pd
 import sqlite3
 import re
+import time
+
 # Check if URL is provided as a command-line argument
 if len(sys.argv) != 2:
     print("Usage: python team_1_player_stats.py <match_url>")
@@ -11,17 +13,48 @@ if len(sys.argv) != 2:
 
 # Define the URL for the match
 url = sys.argv[1]
+print(f"Attempting to fetch data from: {url}")
 
-# Function to fetch and parse the HTML page
+# Validate URL format
+if not url.startswith('https://fbref.com/'):
+    print("Warning: URL doesn't appear to be from fbref.com. Results may be unexpected.")
+
+# Function to fetch and parse the HTML page using cloudscraper
 def fetch_fbref_data(url):
-    response = requests.get(url)
-    if response.status_code == 200:
+    try:
+        # Create a cloudscraper session
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            },
+            delay=10
+        )
+        
+        # First visit the main site to get cookies
+        scraper.get('https://fbref.com/en/')
+        
+        # Then get the actual page
+        response = scraper.get(url)
+        print(f"Response status code: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"Failed to retrieve data. Status code: {response.status_code}")
+            # Save the response content for debugging
+            with open('error_response.html', 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            return None
+            
+        # Save the HTML to a file for inspection (optional)
+        with open('response.html', 'w', encoding='utf-8') as f:
+            f.write(response.text)
+            
         soup = BeautifulSoup(response.text, 'html.parser')
         return soup
-    else:
-        print("Failed to retrieve data")
+    except Exception as e:
+        print(f"Error fetching data: {e}")
         return None
-
 
 def extract_team_ids(soup):
     # Find all divs that contain team stats
@@ -41,8 +74,13 @@ def extract_team_ids(soup):
         print("Could not find team IDs")
         return None, None
 
-
+# Fetch the webpage data
 soup = fetch_fbref_data(url)
+if soup is None:
+    print("Failed to fetch and parse the webpage. Exiting.")
+    sys.exit(1)
+
+# Extract team IDs
 team_1_id, team_2_id = extract_team_ids(soup)
 
 # For team_1_player_stats.py, use team_1_id
@@ -55,18 +93,35 @@ if not team_id:
 print(f"Processing stats for team ID: {team_id}")
 
 def extract_team_name(soup):
+    # Try multiple ways to find the team name
+    # First attempt: Look for keeper stats section
     team_span = soup.find('span', {'class': 'section_anchor', 'id': f'keeper_stats_{team_id}_link'})
     if team_span and 'data-label' in team_span.attrs:
         team_name = team_span['data-label']
         # Remove 'Goalkeeper Stats' from the team name
         team_name = team_name.replace(" Goalkeeper Stats", "")
         return team_name
-    else:
-        print("Team name not found!")
-        return None
+    
+    # Second attempt: Look for summary stats section
+    team_span = soup.find('span', {'class': 'section_anchor', 'id': f'stats_{team_id}_summary_link'})
+    if team_span and 'data-label' in team_span.attrs:
+        team_name = team_span['data-label']
+        # Remove 'Summary' from the team name
+        team_name = team_name.replace(" Summary", "")
+        return team_name
+    
+    # Third attempt: Look for team headers
+    team_header = soup.find('h2', string=lambda text: text and 'Stats' in text)
+    if team_header:
+        team_name = team_header.get_text().replace(" Stats", "").strip()
+        return team_name
+    
+    print("Team name not found using multiple methods!")
+    return "Unknown Team"
 
 # Extract team name (e.g., Real Madrid or Barcelona)
 team_name = extract_team_name(soup)
+print(f"Team name: {team_name}")
 
 # Function to extract section data by div id and convert it to DataFrame
 def extract_section_data(soup, div_id, columns):
@@ -85,11 +140,22 @@ def extract_section_data(soup, div_id, columns):
     data = []
     rows = table.find_all('tr')
 
+    # Skip header rows (first 2)
+    if len(rows) < 3:
+        print(f"Not enough rows in table for section '{div_id}'")
+        return None
+
     for row in rows[2:]:
         cells = row.find_all(['th', 'td'])
         row_data = [cell.get_text(strip=True) for cell in cells]
         if len(row_data) == len(columns):  # Ensure row has expected number of columns
             data.append(row_data)
+        else:
+            print(f"Row has {len(row_data)} columns, expected {len(columns)} in section '{div_id}'")
+
+    if not data:
+        print(f"No data extracted for section '{div_id}'")
+        return None
 
     # Convert to DataFrame with the specified columns
     df_section = pd.DataFrame(data, columns=columns)
@@ -165,13 +231,13 @@ sections = {
         'Minute', 'Player', 'Squad', 'xG', 'PSxG', 'Outcome', 'Distance',
         'Body Part', 'Notes', 'SCA1_Player', 'SCA1_Event', 'SCA2_Player', 'SCA2_Event',
     ]),
-
 }
 
 # Extract and store each section in a separate database
 for section_name, (div_id, columns) in sections.items():
+    print(f"Processing {section_name} section...")
     df = extract_section_data(soup, div_id, columns)
-    if df is not None:
+    if df is not None and not df.empty:
         # Add the 'Team' column to the DataFrame
         df['Team'] = team_name
 
@@ -183,5 +249,9 @@ for section_name, (div_id, columns) in sections.items():
         db_name = f"team_1_{section_name}_stats.db"  # Unique database file for each section
         store_dataframe_to_sql(df, team_name, db_name, f"{section_name}_stats")
     else:
-        print(f"Data for '{section_name}' section could not be extracted.")
+        print(f"Data for '{section_name}' section could not be extracted or is empty.")
+    
+    # Add a small delay to avoid overwhelming the server
+    time.sleep(0.5)
 
+print("Data extraction and storage complete.")
