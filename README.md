@@ -69,5 +69,7 @@ Returns JSON data containing match metrics and generated visualizations.
 The frontend for this project is available at:
 [FootballMatchAnalysisFrontend](https://github.com/DSnake333/FootballMatchAnalysisFrontend) (https://football-match-analyzer.netlify.app/)
 
+and the backend can be accessed at : https://footballmatchanalysisbackend-production.up.railway.app/
+
 ## License
 This project is licensed under the MIT License.
